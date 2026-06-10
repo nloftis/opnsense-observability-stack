@@ -1,0 +1,283 @@
+// ============================================================
+// Grafana Alloy configuration for OPNsense log ingestion
+// Pipeline: OPNsense -> UDP/TCP 514 -> Alloy -> Loki
+// ============================================================
+
+// ----- 1. Receive syslog from OPNsense -----
+loki.source.syslog "opnsense" {
+  listener {
+    address  = "0.0.0.0:514"
+    protocol = "udp"
+    labels   = {
+      job  = "opnsense",
+      host = "opnsense",
+    }
+  }
+  listener {
+    address  = "0.0.0.0:514"
+    protocol = "tcp"
+    labels   = {
+      job  = "opnsense",
+      host = "opnsense",
+    }
+  }
+  forward_to = [
+    loki.process.classify.receiver,
+    loki.process.wan_attackers.receiver,    
+  ]
+}
+
+// ----- 2. Classify logs by type -----
+loki.process "classify" {
+  // Default: tag everything as general first
+  stage.static_labels {
+    values = { log_type = "general" }
+  }
+
+  // Firewall: all filterlog CSV lines contain ",igc[0-9]+,match,(pass|block),"
+  stage.match {
+    selector = `{job="opnsense"} |~ ",igc[0-9]+,match,(pass|block),"`
+    stage.static_labels {
+      values = { log_type = "firewall" }
+    }
+  }
+
+  // Firewall: Enhance logs with interface, action, direction, src/dest IP, src/dest zones
+  stage.match {
+    selector = `{job="opnsense", log_type="firewall"}`
+
+    // Parse filterlog by its fixed CSV field positions (counting commas)
+    stage.regex {
+      expression = "^[^,]*,,,[^,]*,(?P<iface>igc[0-9]+),match,(?P<action>pass|block),(?P<direction>in|out),.*?" +
+                   "(?P<src_ip>[0-9]{1,3}(?:\\.[0-9]{1,3}){3}),(?P<dst_ip>[0-9]{1,3}(?:\\.[0-9]{1,3}){3})," +
+                   "(?P<src_port>[0-9]+),(?P<dst_port>[0-9]+)"	
+    }
+
+    stage.labels {
+      values = {
+        iface     = "iface",
+        action    = "action",
+        direction = "direction",
+        src_ip    = "src_ip",
+        dst_ip    = "dst_ip",
+        // src_port intentionally excluded — ephemeral ports create extreme cardinality
+        // with no dashboard query value
+        dst_port  = "dst_port",
+      }
+    }
+
+    // Extract proto for ALL firewall logs (tcp/udp/icmp)
+    // proto_id intentionally excluded — redundant with human-readable proto label
+    stage.regex {
+      expression = ".*,(?P<proto_id>[0-9]+),(?P<proto>tcp|udp|icmp),"
+    }
+
+    stage.labels {
+      values = {
+        proto = "proto",
+      }
+    }
+  }
+
+  // ICMP: no ports
+  stage.match {
+    selector = `{job="opnsense", log_type="firewall"} |~ ",icmp,"`
+
+    stage.regex {
+      expression = "^[^,]*,,,[^,]*,(?P<iface>igc[0-9]+),match,(?P<action>pass|block),(?P<direction>in|out)," +
+                   ".*?,(?P<proto_id>[0-9]+),(?P<proto>icmp),(?P<length>[0-9]+)," +
+                   "(?P<src_ip>[0-9]{1,3}(?:\\.[0-9]{1,3}){3}),(?P<dst_ip>[0-9]{1,3}(?:\\.[0-9]{1,3}){3}),"
+    }
+
+    stage.labels {
+      values = {
+        iface     = "iface",
+        action    = "action",
+        direction = "direction",
+        length    = "length",
+        src_ip    = "src_ip",
+        dst_ip    = "dst_ip",
+      }
+    }
+  }
+
+  // Zones (subnet classification)
+  // IMPORTANT: This must run AFTER src_ip/dst_ip labels are extracted above.
+  stage.match {
+    // if src_ip exists in filterlog TCP/UDP entries → dst_ip always exists.
+    selector = `{job="opnsense", log_type="firewall", src_ip=~".+"}`
+
+    // Default: anything not in our private subnets is treated as "wan"
+    stage.static_labels {
+      values = {
+        src_zone = "wan",
+        dst_zone = "wan",
+      }
+    }
+
+    // src zones
+    stage.match {
+      selector = `{src_ip=~"192\\.168\\.1\\..*"}`
+      stage.static_labels {
+        values = { src_zone = "lan" }
+      }
+    }
+
+    stage.match {
+      selector = `{src_ip=~"192\\.168\\.10\\..*"}`
+      stage.static_labels {
+        values = { src_zone = "pc" }
+      }
+    }
+
+    stage.match {
+      selector = `{src_ip=~"192\\.168\\.20\\..*"}`
+      stage.static_labels {
+        values = { src_zone = "nas" }
+      }
+    }
+
+    // dst zones
+    stage.match {
+      selector = `{dst_ip=~"192\\.168\\.1\\..*"}`
+      stage.static_labels {
+        values = { dst_zone = "lan" }
+      }
+    }
+
+    stage.match {
+      selector = `{dst_ip=~"192\\.168\\.10\\..*"}`
+      stage.static_labels {
+        values = { dst_zone = "pc" }
+      }
+    }
+
+    stage.match {
+      selector = `{dst_ip=~"192\\.168\\.20\\..*"}`
+      stage.static_labels {
+        values = { dst_zone = "nas" }
+      }
+    }
+  }
+
+  // DHCP: actual DHCP protocol transaction lines only
+  stage.match {
+    selector = `{job="opnsense"} |~ "DHCP(REQUEST|ACK|OFFER|DISCOVER|RELEASE|INFORM|NAK)"`
+    stage.static_labels {
+      values = { log_type = "dhcp" }
+    }
+  }
+
+  // Syslog-ng pipeline statistics -- must come AFTER dhcp to override false match
+  // Contains "Log statistics;" and includes dropped/processed counters
+  stage.match {
+    selector = `{job="opnsense"} |~ "Log statistics;"`
+    stage.static_labels {
+      values = { log_type = "syslog_stats" }
+    }
+  }
+
+  // DNS (AdGuard querylog forwarded via syslog-ng) - match by JSON content
+  stage.match {
+    selector = `{job="opnsense"} |~ "\"QH\"" |~ "\"QT\"" |~ "\"IP\"" |~ "\"T\""`
+
+    stage.static_labels {
+      values = {
+        log_type     = "dns",
+        service_name = "adguard",
+      }
+    }
+
+    // Extract key fields from the JSON payload
+    stage.json {
+      expressions = {
+        T  = "T",
+        QH = "QH",
+        QT = "QT",
+        IP = "IP",
+        QC = "QC",
+      }
+    }
+
+    // Create label to use in Grafana dashboards
+    stage.labels {
+      values = {
+        client_ip = "IP",
+      }
+    }
+
+    // Use AdGuard's event timestamp for Loki indexing (fixes time mismatch)
+    stage.timestamp {
+      source = "T"
+      format = "RFC3339Nano"
+    }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+// ----- 2a. WAN attacker stream (low cardinality for attacker dashboard)
+// Changelog:
+//   - Added dst_port capture to existing regex (extends TCP/UDP field extraction)
+//   - Added src_net (/24 subnet) derivation via stage.regex + stage.template
+//   - src_ip label retained for short-range top-attacker-IP queries
+//   - src_net label added for long-range queries without series explosion
+//   - dst_port label added for targeted services panel
+loki.process "wan_attackers" {
+
+  // Keep ONLY inbound WAN blocks on igc0; drop everything else
+  stage.match {
+    selector = `{job="opnsense"} |~ ",igc0,match,block,in," |~ ",(tcp|udp|icmp),"`
+    action   = "keep"
+
+    // Extract src_ip, dst_ip, dst_port from firewall log
+    // proto_id: 6=TCP, 17=UDP, 1=ICMP
+    stage.regex {
+      expression = "^[^,]*,,,[^,]*,igc0,match,block,in,.*?,(?P<proto_id>6|17|1),(?P<proto>tcp|udp|icmp),(?P<length>[0-9]+),(?P<src_ip>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}),(?P<dst_ip>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}),(?P<src_port>[0-9]+),(?P<dst_port>[0-9]+)"
+    }
+
+    // Derive /24 subnet from src_ip for long-range attacker aggregation.
+    // Runs against the extracted src_ip value, not the full log line.
+    stage.regex {
+      source     = "src_ip"
+      expression = "(?P<oct1>[0-9]+)\\.(?P<oct2>[0-9]+)\\.(?P<oct3>[0-9]+)\\.[0-9]+"
+    }
+
+    stage.template {
+      source   = "src_net"
+      template = "{{ .oct1 }}.{{ .oct2 }}.{{ .oct3 }}.0/24"
+    }
+
+    // Static labels — always low cardinality
+    stage.static_labels {
+      values = {
+        view      = "wan_attackers",
+        log_type  = "firewall",
+        action    = "block",
+        direction = "in",
+        src_zone  = "wan",
+      }
+    }
+
+    // Dynamic labels:
+    //   src_ip  — for short-range top-attacker-IP queries (≤15m)
+    //   src_net — for long-range top-attacker-network queries (1h–24h)
+    //   dst_port — for targeted services panel (naturally low cardinality)
+    stage.labels {
+      values = {
+        src_ip   = "src_ip",
+        src_net  = "src_net",
+        dst_port = "dst_port",
+      }
+    }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+// ----- 3. Write to Loki -----
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

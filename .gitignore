@@ -1,0 +1,36 @@
+# Grafana runtime
+grafana/grafana.db
+grafana/plugins/
+grafana/csv/
+grafana/pdf/
+grafana/png/
+grafana/unified-search/
+
+# Loki runtime data
+loki/data/
+
+# Prometheus TSDB
+prometheus/data/
+
+# Alloy runtime data
+alloy/data/
+
+# Draft READMEs
+README_v1.txt
+README_v2.txt
+README_v3.txt
+
+# Alloy original config
+alloy/config.alloy.ori
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor artifacts
+.vscode/
+*.swp
+*.swo
+
+# Local environment variables
+.env
