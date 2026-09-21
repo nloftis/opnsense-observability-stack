@@ -121,7 +121,7 @@ Pinned image versions (last verified 2026-09-21):
 | Image | Version |
 |---|---|
 | grafana/alloy | v1.19.2 |
-| grafana/loki | 3.0.0 |
+| grafana/loki | 3.7.8 |
 | grafana/grafana | 13.0.2 |
 | prom/prometheus | v3.12.0 |
 | unbound-exporter | locally built from `./unbound-exporter/Dockerfile` |

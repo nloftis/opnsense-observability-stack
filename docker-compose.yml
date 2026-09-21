@@ -25,7 +25,7 @@ services:
       - telemetry-net
 
   loki:
-    image: grafana/loki:3.0.0
+    image: grafana/loki:3.7.8
     container_name: loki
     pull_policy: never
     restart: unless-stopped
