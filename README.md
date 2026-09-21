@@ -123,7 +123,7 @@ Pinned image versions (last verified 2026-09-21):
 | grafana/alloy | v1.19.2 |
 | grafana/loki | 3.7.8 |
 | grafana/grafana | 13.0.2 |
-| prom/prometheus | v3.12.0 |
+| prom/prometheus | v3.14.0 |
 | unbound-exporter | locally built from `./unbound-exporter/Dockerfile` |
 
 unbound-exporter base image: `python:3.14-slim`
