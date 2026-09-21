@@ -212,26 +212,48 @@ loki.process "classify" {
 
 // ----- 2a. WAN attacker stream (low cardinality for attacker dashboard)
 // Changelog:
-//   - Added dst_port capture to existing regex (extends TCP/UDP field extraction)
+//   - Added dst_port capture for TCP/UDP targeted-services analysis
+//   - Added separate ICMP parsing because ICMP firewall records have no port fields
 //   - Added src_net (/24 subnet) derivation via stage.regex + stage.template
-//   - src_ip label retained for short-range top-attacker-IP queries
-//   - src_net label added for long-range queries without series explosion
-//   - dst_port label added for targeted services panel
+//   - Keep src_ip as an extracted value, but do not promote it to a Loki label
+//     because WAN source IP cardinality can exceed Loki's series query limit
+//   - Individual source IPs remain available in the raw log for query-time extraction
+//   - src_net label retained for long-range attacker aggregation
+//   - dst_port label is intentionally absent for ICMP
 loki.process "wan_attackers" {
 
-  // Keep ONLY inbound WAN blocks on igc0; drop everything else
+  // Keep ONLY inbound WAN blocks on igc0; drop everything else.
+  // ICMP is intentionally included because blocked ICMP probes are valid
+  // WAN reconnaissance/attack telemetry even though ICMP has no ports.
   stage.match {
     selector = `{job="opnsense"} |~ ",igc0,match,block,in," |~ ",(tcp|udp|icmp),"`
     action   = "keep"
 
-    // Extract src_ip, dst_ip, dst_port from firewall log
-    // proto_id: 6=TCP, 17=UDP, 1=ICMP
-    stage.regex {
-      expression = "^[^,]*,,,[^,]*,igc0,match,block,in,.*?,(?P<proto_id>6|17|1),(?P<proto>tcp|udp|icmp),(?P<length>[0-9]+),(?P<src_ip>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}),(?P<dst_ip>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}),(?P<src_port>[0-9]+),(?P<dst_port>[0-9]+)"
+    // TCP/UDP firewall records contain source and destination ports.
+    // proto_id: 6=TCP, 17=UDP
+    stage.match {
+      selector = `{job="opnsense"} |~ ",(tcp|udp),"`
+
+      stage.regex {
+        expression = "^[^,]*,,,[^,]*,igc0,match,block,in,.*?,(?P<proto_id>6|17),(?P<proto>tcp|udp),(?P<length>[0-9]+),(?P<src_ip>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}),(?P<dst_ip>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}),(?P<src_port>[0-9]+),(?P<dst_port>[0-9]+)"
+      }
     }
 
-    // Derive /24 subnet from src_ip for long-range attacker aggregation.
-    // Runs against the extracted src_ip value, not the full log line.
+    // ICMP firewall records contain source/destination IPs but no ports.
+    // Keep dst_port unset so existing ICMP dashboard queries can distinguish
+    // ICMP from TCP/UDP without introducing a synthetic port value.
+    // proto_id: 1=ICMP
+    stage.match {
+      selector = `{job="opnsense"} |~ ",icmp,"`
+
+      stage.regex {
+        expression = "^[^,]*,,,[^,]*,igc0,match,block,in,.*?,(?P<proto_id>1),(?P<proto>icmp),(?P<length>[0-9]+),(?P<src_ip>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}),(?P<dst_ip>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}),"
+      }
+    }
+
+    // Derive /24 subnet from src_ip for attacker aggregation.
+    // src_ip remains an extracted value but is deliberately NOT a Loki label.
+    // Both TCP/UDP and ICMP parsers populate src_ip before reaching this stage.
     stage.regex {
       source     = "src_ip"
       expression = "(?P<oct1>[0-9]+)\\.(?P<oct2>[0-9]+)\\.(?P<oct3>[0-9]+)\\.[0-9]+"
@@ -254,12 +276,13 @@ loki.process "wan_attackers" {
     }
 
     // Dynamic labels:
-    //   src_ip  — for short-range top-attacker-IP queries (≤15m)
-    //   src_net — for long-range top-attacker-network queries (1h–24h)
-    //   dst_port — for targeted services panel (naturally low cardinality)
+    //   src_net  — attacker-network aggregation without per-IP stream cardinality
+    //   dst_port — targeted services panel (TCP/UDP only; absent for ICMP)
+    //
+    // src_ip is intentionally not promoted to a label. Individual source IPs
+    // remain in the raw firewall log and can be extracted at query time.
     stage.labels {
       values = {
-        src_ip   = "src_ip",
         src_net  = "src_net",
         dst_port = "dst_port",
       }

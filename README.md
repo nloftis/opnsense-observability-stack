@@ -120,7 +120,7 @@ Pinned image versions (last verified 2026-09-21):
 
 | Image | Version |
 |---|---|
-| grafana/alloy | v1.16.2 |
+| grafana/alloy | v1.19.2 |
 | grafana/loki | 3.0.0 |
 | grafana/grafana | 13.0.2 |
 | prom/prometheus | v3.12.0 |
@@ -140,7 +140,9 @@ All pre-built image containers use `pull_policy: never` to prevent automatic ima
 cd /volume1/docker/telemetry && sudo docker compose up -d
 ```
 
-To intentionally upgrade an image, temporarily remove `pull_policy: never` for that container, pull, then restore the setting.
+To intentionally upgrade an image, explicitly pull the desired pinned version with `docker pull`, verify the downloaded image, update the image version in
+`docker-compose.yml`, validate the Compose configuration, and recreate only the affected service. `pull_policy: never` can remain enabled because the required
+image has already been cached locally.
 
 **Note on unbound-exporter (locally built):**
 `pull_policy: never` does not apply to locally built images. After any change to `unbound_exporter.py` or `Dockerfile`:
@@ -236,15 +238,28 @@ Labels written by the `wan_attackers` pipeline:
 | `action` | `"block"` (static) |
 | `direction` | `"in"` (static) |
 | `src_zone` | `"wan"` (static) |
-| `src_ip` | attacker IP (dynamic — for short-range queries ≤15m) |
-| `src_net` | x.x.x.0/24 (dynamic — for long-range queries 1h–24h) |
+| `src_net` | x.x.x.0/24 (dynamic — attacker-network aggregation) |
 | `dst_port` | port number (dynamic — TCP/UDP only, absent for ICMP) |
+
+> **Note:** The full attacker `src_ip` is retained in the raw firewall log but is
+> intentionally not promoted to a Loki label. Per-IP cardinality can exceed
+> Loki's series query limit over longer time ranges. Individual source IPs can
+> be extracted at query time when needed.
 
 **Dashboard query patterns:**
 
-Short range (≤15m) — top attacker IPs:
+Short range (≤15m) — top attacker IPs (query-time extraction):
 ```logql
-topk(15, sum by (src_ip)(count_over_time({view="wan_attackers"}[$__range])))
+topk(
+  15,
+  sum by (source_ip) (
+    count_over_time(
+      {view="wan_attackers"}
+      | regexp ".*,in,.*?,(?P<proto_id>6|17),(?P<proto>tcp|udp),(?P<length>[0-9]+),(?P<source_ip>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}),.*"
+      [15m]
+    )
+  )
+)
 ```
 
 Long range (1h–24h) — top attacker networks:
@@ -728,12 +743,13 @@ Both telemetry firewall rules must appear above the final deny rule.
 
 ## Loki Series Limit
 
-Loki enforces a default limit of 500 unique series per query (`max_query_series_limit`). This limit is hit when grouping by high-cardinality labels like `src_ip` over long time ranges.
+Loki enforces a default limit of 500 unique series per query (`max_query_series_limit`). Per-IP labeling can exceed this limit when large numbers of external attacker IPs appear over longer time ranges.
 
-The `wan_attackers` pipeline was specifically designed to work within this limit:
+The `wan_attackers` pipeline is designed to keep indexed label cardinality low:
 
-- Short time ranges (≤15m): group by `src_ip` (individual attacker IPs)
-- Long time ranges (1h–24h): group by `src_net` (/24 aggregation)
+- `src_ip` is retained in the raw firewall log but is not promoted to a Loki label.
+- Short time ranges (≤15m): individual attacker IPs can be extracted at query time when needed.
+- Longer time ranges (1h–24h): group by `src_net` (/24 aggregation).
 
 If the series limit is hit on other queries, consider raising the limit in `loki/config.yml` under `limits_config`:
 
