@@ -1,15 +1,15 @@
+import os
 import time
 import requests
 import logging
+import urllib3
 from prometheus_client import start_http_server, Counter, Gauge
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-
-import os
-OPNSENSE_URL = os.environ.get("OPNSENSE_URL")
-API_KEY      = os.environ.get("OPNSENSE_API_KEY")
-API_SECRET   = os.environ.get("OPNSENSE_API_SECRET")
+OPNSENSE_URL = os.environ["OPNSENSE_URL"]
+API_KEY      = os.environ["OPNSENSE_API_KEY"]
+API_SECRET   = os.environ["OPNSENSE_API_SECRET"]
 SCRAPE_INTERVAL = 60
 PORT            = 9101
 
@@ -33,6 +33,7 @@ rrset_cache      = Gauge('unbound_rrset_cache_count',             'RRset cache e
 
 def collect():
     try:
+        # OPNsense uses a self-signed certificate; TLS verification is intentionally disabled.
         r = requests.get(OPNSENSE_URL, auth=(API_KEY, API_SECRET),
                          verify=False, timeout=10)
         r.raise_for_status()
@@ -63,7 +64,6 @@ def collect():
         logging.error(f"Scrape failed: {e}")
 
 if __name__ == '__main__':
-    import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     start_http_server(PORT)
     logging.info(f"Unbound exporter started on port {PORT}")

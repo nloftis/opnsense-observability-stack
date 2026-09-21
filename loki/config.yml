@@ -1,3 +1,4 @@
+# Loki is not exposed to the host/LAN; access is limited to telemetry-net.
 auth_enabled: false
 
 server:

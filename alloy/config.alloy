@@ -1,18 +1,10 @@
 // ============================================================
 // Grafana Alloy configuration for OPNsense log ingestion
-// Pipeline: OPNsense -> UDP/TCP 514 -> Alloy -> Loki
+// Pipeline: OPNsense -> TCP 514 -> Alloy -> Loki
 // ============================================================
 
 // ----- 1. Receive syslog from OPNsense -----
 loki.source.syslog "opnsense" {
-  listener {
-    address  = "0.0.0.0:514"
-    protocol = "udp"
-    labels   = {
-      job  = "opnsense",
-      host = "opnsense",
-    }
-  }
   listener {
     address  = "0.0.0.0:514"
     protocol = "tcp"
@@ -94,6 +86,7 @@ loki.process "classify" {
         iface     = "iface",
         action    = "action",
         direction = "direction",
+        proto     = "proto",
         length    = "length",
         src_ip    = "src_ip",
         dst_ip    = "dst_ip",
@@ -104,7 +97,8 @@ loki.process "classify" {
   // Zones (subnet classification)
   // IMPORTANT: This must run AFTER src_ip/dst_ip labels are extracted above.
   stage.match {
-    // if src_ip exists in filterlog TCP/UDP entries → dst_ip always exists.
+    // If src_ip was successfully extracted from a firewall entry,
+    // dst_ip is also available for zone classification.
     selector = `{job="opnsense", log_type="firewall", src_ip=~".+"}`
 
     // Default: anything not in our private subnets is treated as "wan"

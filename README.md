@@ -9,8 +9,8 @@ This stack provides a log aggregation and visualization pipeline for OPNsense fi
 ## Architecture
 
 ```
-OPNsense (syslog UDP/TCP 514) --> Alloy --> Loki --> Grafana
-OPNsense API (HTTPS 443)      --> unbound-exporter --> Prometheus --> Grafana
+OPNsense (syslog TCP 514) --> Alloy --> Loki --> Grafana
+OPNsense API (HTTPS 443)  --> unbound-exporter --> Prometheus --> Grafana
 ```
 
 **Components:**
@@ -34,54 +34,89 @@ The OPNsense GUI resets DNS counters (cachehits, cachemiss, queries) on every DN
 
 ## Directory Structure
 
+The Git repository on Pop!_OS is the source of truth for configuration and application source files. Mutable container data exists only on the Synology deployment and is not copied back into the Git repository.
+
+### Git Repository (Pop!_OS)
+
+```text
+telemetry/
+├── alloy/
+│   └── config.alloy
+├── loki/
+│   └── config.yml
+├── prometheus/
+│   └── prometheus.yml
+├── unbound-exporter/
+│   ├── Dockerfile
+│   └── unbound_exporter.py
+├── docker-compose.yml
+├── .env.example
+├── .gitignore
+└── README.md
 ```
+
+A local `.env` may also exist for deployment purposes but is excluded from Git.
+
+### Synology Deployment
+
+```text
 /volume1/docker/telemetry/
-  docker-compose.yml
-  alloy/
-    config.alloy          # Alloy pipeline configuration
-    data/                 # Alloy persistent state
-    GeoLite2-City.mmdb    # MaxMind GeoIP database (download separately)
-  loki/
-    config.yml            # Loki configuration
-    data/                 # Loki log storage
-      chunks/
-      compactor/
-      rules/
-      tsdb-shipper-cache/
-  prometheus/
-    prometheus.yml        # Prometheus scrape configuration
-    data/                 # Prometheus metrics storage
-  unbound-exporter/
-    Dockerfile            # Builds local Python exporter image
-    unbound_exporter.py   # Exporter script
-  grafana/                # Grafana persistent state
+├── alloy/
+│   ├── config.alloy
+│   └── data/
+├── loki/
+│   ├── config.yml
+│   └── data/
+├── prometheus/
+│   ├── prometheus.yml
+│   └── data/
+├── unbound-exporter/
+│   ├── Dockerfile
+│   └── unbound_exporter.py
+├── grafana/
+├── docker-compose.yml
+└── .env
 ```
+
+Persistent runtime data:
+
+- `alloy/data/` — Alloy state
+- `loki/data/` — Loki log storage and indexes
+- `prometheus/data/` — Prometheus TSDB
+- `grafana/` — Grafana database, dashboards, plugins, and state
+
+These runtime directories are intentionally excluded from Git. They may be protected through NAS backup/snapshot mechanisms, but should not be copied back into the source repository as part of normal deployment.
 
 ## Ports
 
-| Port | Purpose |
-|---|---|
-| 514/UDP | OPNsense syslog ingestion (Alloy) |
-| 514/TCP | OPNsense syslog ingestion (Alloy) |
-| 3000/TCP | Grafana UI |
-| 3100/TCP | Loki API |
-| 9090/TCP | Prometheus UI |
-| 9101/TCP | unbound-exporter metrics endpoint |
-| 12345/TCP | Alloy debug UI |
+Only services that require host access are published by Docker.
+
+| Port | Exposure | Purpose |
+|---|---|---|
+| 514/TCP | Host-published | OPNsense RFC5424 syslog ingestion by Alloy |
+| 3000/TCP | Host-published | Grafana UI |
+| 12345/TCP | Host-published | Alloy HTTP/debug UI |
+| 3100/TCP | Internal only | Loki API, reached by Alloy/Grafana over `telemetry-net` |
+| 9090/TCP | Internal only | Prometheus, reached by Grafana over `telemetry-net` |
+| 9101/TCP | Internal only | unbound-exporter metrics, reached by Prometheus over `telemetry-net` |
+
+UDP/514 is not used. OPNsense sends syslog to Alloy over TCP.
 
 ## Access
 
-| Service | URL |
+| Service | Access |
 |---|---|
-| Grafana | http://192.168.20.10:3000 |
-| Loki API | http://192.168.20.10:3100 |
-| Prometheus UI | http://192.168.20.10:9090 |
-| unbound-exporter | http://192.168.20.10:9101/metrics |
-| Alloy UI | http://192.168.20.10:12345 |
+| Grafana | `http://192.168.20.10:3000` |
+| Alloy UI | `http://192.168.20.10:12345` |
+| Loki | Internal Docker DNS: `http://loki:3100` |
+| Prometheus | Internal Docker DNS: `http://prometheus:9090` |
+| unbound-exporter | Internal Docker DNS: `http://unbound-exporter:9101` |
+
+Loki, Prometheus, and unbound-exporter are intentionally not published to the Synology host. Their consumers use Docker DNS on `telemetry-net`.
 
 ## Versions
 
-Pinned image versions (last verified 2026-06-06):
+Pinned image versions (last verified 2026-09-21):
 
 | Image | Version |
 |---|---|
@@ -92,11 +127,11 @@ Pinned image versions (last verified 2026-06-06):
 | unbound-exporter | locally built from `./unbound-exporter/Dockerfile` |
 
 unbound-exporter base image: `python:3.14-slim`
-Libraries: `prometheus_client==0.21.1`, `requests==2.32.3`
+Libraries: `prometheus_client==0.26.0`, `requests==2.34.2`
 
 **Access credentials:**
 - Grafana admin password: see password manager
-- OPNsense API key/secret: see password manager (nloftis user API key), stored in `docker-compose.yml` environment variables
+- OPNsense API key/secret: see password manager; stored in `.env` on the deployment host and referenced by Compose. `.env` is excluded from Git.
 
 **Note on `pull_policy: never`:**
 All pre-built image containers use `pull_policy: never` to prevent automatic image updates. Container Manager's "Build" function will fail on first run if the image is not already cached locally. Always use the CLI:
@@ -129,7 +164,7 @@ sudo docker compose up -d unbound-exporter
 | Hostname | 192.168.20.10 |
 | Port | 514 |
 | RFC5424 | Checked |
-| Description | Telemetry |
+| Description | Alloy Telemetry |
 
 > **Note:** Transport was changed from UDP(4) to TCP(4) for more reliable log delivery. TCP provides guaranteed delivery and is preferred over UDP for syslog forwarding where log loss is unacceptable.
 
@@ -138,9 +173,8 @@ sudo docker compose up -d unbound-exporter
 **OPNsense API (required by unbound-exporter):**
 
 - System → Access → Users → nloftis → API key (ticket icon in Commands)
-- Firewall rule required: Allow NAS net → 192.168.1.1 HTTPS (443)
-  - Added to Firewall → Rules → NAS
-  - Description: `Allow (NAS) -> OPNsense API`
+- OPNsense firewall rule required: allow the NAS/telemetry path to the OPNsense API on HTTPS (443)
+- Synology DSM firewall must allow Docker subnet `172.24.0.0/16` so telemetry containers can reach external destinations, including the OPNsense API
 - Services → Unbound DNS → Advanced → Extended Statistics: Checked
 
 ## Log Classification
@@ -259,7 +293,12 @@ Prometheus scrapes metrics from unbound-exporter and stores them for 30 days.
 - Scrape interval: 60s
 - Retention: 30 days
 
-To verify scrape targets are UP: http://192.168.20.10:9090/targets
+Prometheus is not host-published. To verify that metrics are being ingested, query Prometheus from inside the container:
+
+```bash
+sudo docker exec prometheus \
+  wget -qO- 'http://localhost:9090/api/v1/query?query=unbound_queries_total'
+```
 
 ## Unbound-Exporter — Custom Prometheus Exporter
 
@@ -386,8 +425,9 @@ sudo docker compose up -d unbound-exporter
 ```
 
 Verify metrics are flowing:
-```bash
-curl -s http://192.168.20.10:9101/metrics | grep "^unbound"
+```
+sudo docker exec unbound-exporter \
+  wget -qO- http://localhost:9101/metrics | grep "^unbound"
 ```
 
 Check logs:
@@ -474,7 +514,7 @@ Dashboard: **SOC Overview** | Datasource: **Loki**
     ))
     ```
   - Transformations: Organize fields by name
-  - Note: `stats.grafana.org` will dominate — expected Alloy reporting noise blocked by AdGuard and retried repeatedly.
+  - Historical note: `stats.grafana.org` may dominate older ranges due to Grafana usage-report retries that were blocked by AdGuard. Grafana reporting is now disabled in Compose.
 
 - **Top DNS Clients** — Ranked table of devices by DNS query volume. Shows Client IP, Query Count. Answers: which devices are most active on DNS?
   - Visualization: Table (Instant query)
@@ -535,58 +575,47 @@ Dashboard: **DNS Performance** | Datasource: **Prometheus**
 
 ## Permission Setup — Important Notes for Synology
 
-Synology uses ACL-based filesystem permissions that override standard Unix `chown` in some cases. Each container runs as its own internal user and requires the data directories to be pre-created and owned correctly BEFORE startup. Both `chown` AND `chmod` are required — `chown` alone is insufficient due to ACLs.
+Synology uses ACL-backed filesystem permissions, so the Unix mode shown by `ls -l` does not always tell the whole story. The important test is whether the user running inside each container can actually write to its persistent data directory.
 
-To determine what user a container runs as:
+Effective container users verified during the 2026-09 restore:
+
+| Container | Effective user | Persistent data |
+|---|---|---|
+| Loki | `10001:10001` | `loki/data/` |
+| Prometheus | `65534:65534` | `prometheus/data/` |
+| Grafana | `472:0` | `grafana/` |
+| Alloy | `root` | `alloy/data/` |
+| unbound-exporter | `65534:65534` | None |
+
+After the DSM restore, Loki, Prometheus, and Grafana retained the expected ownership but their data directories were not writable by their container users. Granting the owner write permission was sufficient:
+
 ```bash
-sudo docker run --rm --entrypoint sh <image> -c 'id'
+sudo chmod u+rwx /volume1/docker/telemetry/loki/data
+sudo chmod u+rwx /volume1/docker/telemetry/prometheus/data
+sudo chmod u+rwx /volume1/docker/telemetry/grafana
 ```
 
-**Loki** (runs as uid=10001, gid=10001):
-```bash
-sudo mkdir -p /volume1/docker/telemetry/loki/data/{rules,compactor,chunks}
-sudo mkdir -p /volume1/docker/telemetry/loki/data/tsdb-shipper-cache
-sudo chown -R 10001:10001 /volume1/docker/telemetry/loki/data
-sudo chmod -R 775 /volume1/docker/telemetry/loki/data
+Do not recursively normalize the modes of the runtime trees merely because Synology displays unexpected Unix permissions. Synology ACL inheritance may cause files and directories to display modes that would be unusual on a conventional Linux filesystem.
+
+Instead, verify effective write access from the relevant container when troubleshooting permissions.
+
+Prometheus is explicitly configured in Compose as `user: "65534:65534"`. Loki and Grafana use the users defined by their official images. Alloy runs as root in the current image. The unbound-exporter runs as `65534:65534` and has no persistent storage.
+
+## Usage Reporting
+
+Anonymous usage reporting is disabled for both Alloy and Grafana.
+
+Alloy is started with:
+
+```text
+--disable-reporting
 ```
 
-**Grafana** (runs as uid=472, gid=0):
-```bash
-sudo chown -R 472:0 /volume1/docker/telemetry/grafana
-sudo chmod -R 775 /volume1/docker/telemetry/grafana
+Grafana is started with:
+
+```text
+GF_ANALYTICS_REPORTING_ENABLED=false
 ```
-
-**Prometheus** (runs as uid=65534, gid=65534 — nobody):
-```bash
-sudo mkdir -p /volume1/docker/telemetry/prometheus/data
-sudo chown -R 65534:65534 /volume1/docker/telemetry/prometheus/data
-sudo chmod -R 775 /volume1/docker/telemetry/prometheus/data
-```
-
-**Alloy** (runs as its default internal user, no override needed): No special permissions required. The `alloy/data` directory is created by synadmin and Alloy can write to it without modification.
-
-**unbound-exporter** (locally built, no persistent storage): No permissions setup required.
-
-**Why not `user: root`?**
-Using `user: root` in `docker-compose.yml` works but is a security antipattern. The correct approach is to pre-create directories with the right ownership so each container runs as its intended non-root user.
-
-**Why not PUID/PGID environment variables?**
-PUID/PGID only work with images built on the LinuxServer.io base image (which includes an init script to create and switch to the specified user). Official Grafana and Loki images do not support PUID/PGID and will ignore these environment variables entirely.
-
-The correct `docker-compose.yml` approach for Loki, Grafana, and Prometheus:
-```yaml
-user: "10001:10001"   # for Loki
-user: "472:0"         # for Grafana
-user: "65534:65534"   # for Prometheus
-```
-
-## Alloy Reporting
-
-Alloy attempts to send telemetry/usage reports to `stats.grafana.org`. This domain is blocked by AdGuard Home (OISD Blocklist Big) on this network, causing repeated DNS failure messages in the Alloy logs.
-
-The `--disable-reporting` flag is set in `docker-compose.yml` to suppress this.
-
-> **Note:** `stats.grafana.org` still dominates the Top Queried Domains panel because AdGuard logs the blocked lookup attempt. This is expected noise.
 
 ## GeoIP Enrichment (Future)
 
@@ -647,6 +676,44 @@ sudo docker logs grafana --tail=20
 sudo docker logs prometheus --tail=20
 sudo docker logs unbound-exporter --tail=20
 ```
+## Docker Network and DSM Firewall
+
+All telemetry containers share a dedicated Docker bridge network:
+
+```yaml
+networks:
+  telemetry-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.24.0.0/16
+```
+
+Containers use Docker DNS names such as `loki`, `prometheus`, and `unbound-exporter` for internal communication. Static container IP addresses are not required.
+
+Loki (3100), Prometheus (9090), and unbound-exporter (9101) are intentionally not published to the Synology host. Only services that require access from outside the Docker network are host-published.
+
+### Synology DSM Firewall
+
+The DSM firewall must allow traffic originating from the telemetry Docker subnet:
+
+- Source: `172.24.0.0/16`
+- Ports: All
+- Protocols: All
+- Action: Allow
+
+This rule is required because DSM's final deny rule otherwise prevents telemetry containers from reaching destinations outside the Docker bridge. This was observed when unbound-exporter could not reach the OPNsense API even though the Synology host itself could.
+
+OPNsense syslog requires a separate DSM firewall rule:
+
+- Source: `192.168.20.1`
+- Port: `514`
+- Protocol: TCP
+- Action: Allow
+
+Although the OPNsense API is reached at `192.168.1.1`, OPNsense uses its NAS-interface address `192.168.20.1` as the source when sending syslog to the Synology at `192.168.20.10`. Packet capture confirmed this source address during troubleshooting.
+
+Both telemetry firewall rules must appear above the final deny rule.
 
 ## Grafana Data Sources
 
@@ -655,7 +722,7 @@ sudo docker logs unbound-exporter --tail=20
 | loki | `http://loki:3100` | Yes |
 | prometheus | `http://prometheus:9090` | No |
 
-> **Note:** Use container names (not IP addresses) so Grafana resolves via Docker's internal DNS on the `loki-net` bridge network.
+> **Note:** Use container names (not IP addresses) so Grafana resolves via Docker's internal DNS on the `telemetry-net` bridge network.
 
 > **Note:** Prometheus datasource must be added manually via Connections → Data sources → Add → Prometheus.
 

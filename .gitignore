@@ -1,25 +1,11 @@
-# Grafana runtime
-grafana/grafana.db
-grafana/plugins/
-grafana/csv/
-grafana/pdf/
-grafana/png/
-grafana/unified-search/
-
-# Loki runtime data
-loki/data/
-
-# Prometheus TSDB
-prometheus/data/
-
-# Alloy runtime data
+# Container runtime data lives only on Synology
 alloy/data/
+loki/data/
+prometheus/data/
+grafana/
 
-# Draft READMEs
-README_v1.txt
-README_v2.txt
-README_v3.txt
-README_v4.txt
+# Archival READMEs
+README_v*
 
 # Alloy original config
 alloy/config.alloy.ori
@@ -33,5 +19,8 @@ Thumbs.db
 *.swp
 *.swo
 
-# Local environment variables
+# Local environment variables / secrets
 .env
+.env.*
+!.env.example
+*_apikey.txt

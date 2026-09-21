@@ -1,18 +1,18 @@
 services:
 
   alloy:
-    image: grafana/alloy:v1.16.2    
+    image: grafana/alloy:v1.16.2
     container_name: alloy
-    pull_policy: never 
+    pull_policy: never
     restart: unless-stopped
     ports:
-      - "514:514/udp"
       - "514:514/tcp"
       - "12345:12345"
     volumes:
       - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
       - ./alloy/data:/var/lib/alloy/data
-    # Reporting disabled: stats.grafana.org is blocked by AdGuard (OISD Blocklist Big)	  
+    # Disable Alloy anonymous usage reporting (to stats.grafana.org)
+    # note: stats.grafana.org is blocked by AdGuard (OISD Blocklist Big)
     command: >
       run
       --server.http.listen-addr=0.0.0.0:12345
@@ -22,32 +22,37 @@ services:
     environment:
       - TZ=Pacific/Honolulu
     networks:
-      - loki-net
+      - telemetry-net
 
   loki:
     image: grafana/loki:3.0.0
     container_name: loki
-    pull_policy: never 
+    pull_policy: never
     restart: unless-stopped
-    ports:
-      - "3100:3100"
+#   Loki is intentionally not published to the host.
+#   Grafana and Alloy access port 3100 over telemetry-net via Docker DNS.
+#   ports:
+#     - "3100:3100"
     volumes:
-      - ./loki/config.yml:/etc/loki/config.yml
+      # Loki configuration is mounted read-only; runtime data remains writable.
+      - ./loki/config.yml:/etc/loki/config.yml:ro
       - ./loki/data:/loki
     command: -config.file=/etc/loki/config.yml
     environment:
       - TZ=Pacific/Honolulu
     networks:
-      - loki-net
+      - telemetry-net
 
   prometheus:
     image: prom/prometheus:v3.12.0
     user: "65534:65534"
     container_name: prometheus
-    pull_policy: never 
+    pull_policy: never
     restart: unless-stopped
-    ports:
-      - "9090:9090"
+#   Prometheus is intentionally not published to the host.
+#   Grafana accesses port 9090 over telemetry-net via Docker DNS.
+#   ports:
+#     - "9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/data:/prometheus
@@ -58,23 +63,28 @@ services:
     environment:
       - TZ=Pacific/Honolulu
     networks:
-      - loki-net
+      - telemetry-net
 
   unbound-exporter:
     build: ./unbound-exporter
     container_name: unbound-exporter
     restart: unless-stopped
-    ports:
-      - "9101:9101"
+#    The exporter is intentionally not published to the host.
+#    Prometheus accesses port 9101 over telemetry-net via Docker DNS.
+#    ports:
+#      - "9101:9101"
     environment:
       - TZ=Pacific/Honolulu
+      - OPNSENSE_URL=${OPNSENSE_URL}
+      - OPNSENSE_API_KEY=${OPNSENSE_API_KEY}
+      - OPNSENSE_API_SECRET=${OPNSENSE_API_SECRET}
     networks:
-      - loki-net
+      - telemetry-net
 
   grafana:
     image: grafana/grafana:13.0.2
     container_name: grafana
-    pull_policy: never 
+    pull_policy: never
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -83,9 +93,16 @@ services:
     environment:
       - TZ=Pacific/Honolulu
       - GF_SECURITY_ADMIN_PASSWORD=${GF_ADMIN_PASSWORD}
+      # Disable anonymous usage statistics sent to stats.grafana.org
+      # note: stats.grafana.org is blocked by AdGuard (OISD Blocklist Big)
+      - GF_ANALYTICS_REPORTING_ENABLED=false
     networks:
-      - loki-net
+      - telemetry-net
 
 networks:
-  loki-net:
+  telemetry-net:
     driver: bridge
+    ipam:
+      # tells Docker exactly which subnet to use
+      config:
+        - subnet: 172.24.0.0/16
