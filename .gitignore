@@ -1,3 +1,15 @@
+# Editor / OS artifacts
+.DS_Store
+*~
+*.swp
+*.swo
+
+# Synology metadata
+@eaDir/
+@SynoResource
+@SynoEAStream
+.SynoResource
+
 # Container runtime data lives only on Synology
 alloy/data/
 loki/data/
@@ -10,14 +22,8 @@ README_v*
 # Alloy original config
 alloy/config.alloy.ori
 
-# OS artifacts
-.DS_Store
-Thumbs.db
-
 # Editor artifacts
 .vscode/
-*.swp
-*.swo
 
 # Local environment variables / secrets
 .env
